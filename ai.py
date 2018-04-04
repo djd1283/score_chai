@@ -2,6 +2,7 @@
 import tensorflow as T
 import random
 import numpy as np
+import chess
 
 piece_ids = {'r': 1, 'n': 2, 'b': 3, 'q': 4, 'k': 5, 'p': 6,
              'R': 7, 'N': 8, 'B': 9, 'Q': 10, 'K': 11, 'P': 12, ' ': 0}
@@ -37,32 +38,44 @@ class ChessAI:
         # tries to predict label results - whether or not white will win the game
         results = T.placeholder(T.float32, shape=(None,), name='result')
 
+        # turn = T.placeholder(T.float32, shape)
+
         piece_embs = T.get_variable('embs', shape=(num_pieces, self.piece_emb_size),
                                     initializer=T.contrib.layers.xavier_initializer(uniform=False))
 
+
+        # first neural representation of board
         board_embs = T.nn.embedding_lookup(piece_embs, boards)
+
+        layer = board_embs
 
         conv1 = T.layers.conv2d(
             inputs=board_embs,
-            filters=15,
+            filters=self.piece_emb_size,
             kernel_size=[2, 2],
             padding="same",
             activation=T.nn.tanh)
 
-        conv2 = T.layers.conv2d(
-            inputs=conv1,
-            filters=15,
-            kernel_size=[4, 4],
-            padding="same",
-            activation=T.nn.tanh)
+        layer = layer + conv1
 
-        conv2_flat = T.contrib.layers.flatten(conv2)
+        # conv2 = T.layers.conv2d(
+        #     inputs=layer,
+        #     filters=self.piece_emb_size,
+        #     kernel_size=[4, 4],
+        #     padding="same",
+        #     activation=T.nn.tanh)
+        #
+        # layer = layer + conv2
 
-        scores = build_linear_layer('linear', conv2_flat, 1, xavier=True)
+        # flatten features and scale values
+        layer_flat = T.contrib.layers.flatten(layer)
+        layer_flat = layer_flat / int(layer_flat.get_shape()[1])
+
+        scores = build_linear_layer('linear', layer_flat, 1, xavier=True)
         scores = T.reshape(scores, shape=(-1,), name='scores')
         probs = T.nn.sigmoid(scores)
 
-        self.loss = T.reduce_mean(T.nn.sigmoid_cross_entropy_with_logits(logits=probs, labels=results))
+        self.loss = T.reduce_mean(T.nn.sigmoid_cross_entropy_with_logits(logits=scores, labels=results))
 
         self.train = T.train.AdamOptimizer(self.lr).minimize(self.loss)
 
@@ -72,38 +85,35 @@ class ChessAI:
         # and the loss function with respect to the label
         self.o = {'probs': probs, 'scores': scores, 'loss': self.loss}
 
-    def make_move(self, boards, k=1.0, test=False):
+    def make_move(self, board, test=False):
         """Given boards corresponding to each move,
         returns the index of the board move the AI choses.
 
         boards - resulting boards after making every legal move
         k - temperature constant of softmax"""
 
-        whites_turn = not boards[0].turn
+        whites_turn = board.turn
 
-        # we normalize by always telling the ai it is white's turn
-        # by flipping the board. we then make the move as white.
-        # this makes learning me from you easier for the model
+        np_board_list = []
 
-        np_boards = convert_to_numpy(boards)
+        for move in board.legal_moves:
+            board.push(move)
+            np_board = board_to_numpy(board)
+            np_board_list.append(np_board)
+            board.pop()
+
+        np_boards = np.stack(np_board_list, axis=0)
 
         scores = self.sess.run(self.o['scores'], feed_dict={self.i['boards']: np_boards})
 
-        # sample from the possible choices - softmax
-        probs = np.exp(k * scores) / np.sum(np.exp(k * scores))
+        # scores tell us how likely white is to win the game from each board
 
-        # black prefers the opposite distribution - minimize prob of white win
-        if not whites_turn:
-            probs = 1 - probs
-
-        if test:
-            choice = np.argmax(probs)
+        if whites_turn:
+            return np.argmax(scores)
         else:
-            choice = np.random.choice(range(len(boards)), p=probs)
+            return np.argmin(scores)
 
-        return choice
-
-    def reinforce(self, boards, result):
+    def reinforce(self, board, result):
         """Apply reinforcement learning signal to AI.
 
         boards - board positions seen throughout a single game of chess
@@ -111,15 +121,40 @@ class ChessAI:
 
         Returns: loss function value"""
 
-        np_boards = convert_to_numpy(boards)
+        # okay, we start with the board
+        # the board has a stack
+        # replay each move and convert to np_board
 
-        np_results = np.repeat(result, len(boards), axis=0)
+        num_moves = len(board.move_stack)
 
-        loss, _ = self.sess.run([self.loss, self.train],
+        np_results = np.repeat(result, num_moves + 1, axis=0) # + 1 for starting board position
+
+        replay_board = chess.Board()
+
+        np_board_list = []
+
+        for move_index in range(num_moves + 1):
+
+            np_board = board_to_numpy(replay_board)
+            np_board_list.append(np_board)
+
+            # on last iteration, there is no move to make
+            if move_index != num_moves:
+                replay_board.push(board.move_stack[move_index])
+
+        np_boards = np.stack(np_board_list, axis=0)
+
+        # we predict probability of white winning the game
+
+        loss, scores, _ = self.sess.run([self.loss, self.o['scores'], self.train],
                                 feed_dict={self.i['results']: np_results, self.i['boards']: np_boards})
 
+        probs = 1 / (1 + np.exp(-scores))
+        preds = np.round(probs)
+        wrong_preds = np.bitwise_xor(preds.astype(bool), np_results.astype(bool))
+        accuracy = 1 - np.mean(wrong_preds)
 
-        return loss
+        return loss, scores, accuracy
 
     def save(self):
         assert self.save_dir is not None
@@ -127,30 +162,36 @@ class ChessAI:
         self.step += 1
 
 
-def convert_to_numpy(boards):
+def board_to_numpy(board, mirror=False):
     """Converts chess boards to numpy format. Each
     chess board becomes 8x8 matrix of ids, each id
     corresponding to each piece in chess (6 pieces for
     white and 6 pieces for black).
 
+    mirror - white's pieces become black's pieces and visa versa
+             board positions are mirrored vertically
+
     Returns: m x 8 x 8 numpy array for m boards.
     0 represents empty space, 1-6 represent
     (rook, knight, bishop, queen, king, pawn)
     for white and 7-12 for black."""
-    num_boards = len(boards)
-    np_boards = np.zeros((num_boards, 8, 8))
-    for index in range(num_boards):
-        map = boards[index].piece_map()
 
-        # Fill in board with pieces
-        for position in map:
-            piece = str(map[position])
-            y = position // 8
-            x = position % 8
+    np_board = np.zeros((8, 8))
+    map = board.piece_map()
 
-            np_boards[index, x, y] = piece_ids[piece]
+    # Fill in board with pieces
+    for position in map:
+        piece = str(map[position])
+        y = position // 8
+        x = position % 8
 
-    return np_boards
+        if mirror:
+            piece.swapcase()
+            y = 7 - y
+
+        np_board[x, y] = piece_ids[piece]
+
+    return np_board
 
 
 def build_linear_layer(name, input_tensor, output_size, xavier=False):
@@ -169,7 +210,7 @@ def build_linear_layer(name, input_tensor, output_size, xavier=False):
     if xavier:
         initializer = T.contrib.layers.xavier_initializer(uniform=False)
     else:
-        initializer = T.random_normal_initializer(stddev=0.01)
+        initializer = T.random_normal_initializer(stddev=0.00001)
 
     input_size = input_tensor.get_shape()[-1]  #tf.shape(input_tensor)[1]
     with T.variable_scope(name):
@@ -208,7 +249,11 @@ def load_scope_from_save(save_dir, sess, scope):
 class RandomPlayer:
     """Player which makes random moves. This is the baseline against which
     we will compare our chess AI."""
-    def make_move(self, boards, test=False):
-        rand_index = random.sample(range(len(boards)), 1)[0]
+
+
+
+    def make_move(self, board, test=False):
+        moves = [move for move in board.legal_moves]
+        rand_index = random.sample(range(len(moves)), 1)[0]
         return rand_index
 
