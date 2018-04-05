@@ -26,8 +26,11 @@ num_games = 100  # number of games to train the AI for
 games_per_save = 10000
 games_per_print = 10000
 verbose = True
-restore= True
-test = True  # if test, then black will be a random player.
+restore = True
+test = True  # if test, then ai plays top move every time, and no saving occurs
+white_ai = True  # otherwise random players
+black_ai = False
+random_play = False  # observe random games
 
 print('Chess AI Version 0.1')
 
@@ -35,12 +38,17 @@ print('Chess AI Version 0.1')
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
-white = ChessAI(piece_emb_size=100, lr=0.01, save_dir=save_dir, restore=restore)
+ai = ChessAI(piece_emb_size=100, lr=0.01, save_dir=save_dir, restore=restore)
 
-if test:
-    black = RandomPlayer()  # testing
+if white_ai:
+    white = ai
 else:
-    black = white  # training
+    white = RandomPlayer()
+
+if black_ai:
+    black = ai  # testing
+else:
+    black = RandomPlayer()  # training
 
 white_wins = 0
 black_wins = 0
@@ -63,7 +71,7 @@ for train_index in tqdm.tqdm(range(num_games)):
 
         moves = [move for move in board.legal_moves]
 
-        if test:
+        if not random_play:
             # Get board positions resulting from all legal moves
 
             # tell player to make a move (choose a board)

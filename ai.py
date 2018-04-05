@@ -38,20 +38,25 @@ class ChessAI:
         # tries to predict label results - whether or not white will win the game
         results = T.placeholder(T.float32, shape=(None,), name='result')
 
-        # turn = T.placeholder(T.float32, shape)
+        turn = T.placeholder(T.float32, shape=(None,), name='turn')
+
+        # add turn as feature to each square of board
+        turn_per_square = T.tile(T.reshape(turn, (-1, 1, 1, 1)), [1, 8, 8, 1])
 
         piece_embs = T.get_variable('embs', shape=(num_pieces, self.piece_emb_size),
                                     initializer=T.contrib.layers.xavier_initializer(uniform=False))
 
-
-        # first neural representation of board
+        # neural representation of board
         board_embs = T.nn.embedding_lookup(piece_embs, boards)
 
-        layer = board_embs
+        # we give the board and whoever's turn it is as input
+        input_embs = T.concat([board_embs, turn_per_square], axis=-1)
+
+        layer = input_embs
 
         conv1 = T.layers.conv2d(
             inputs=board_embs,
-            filters=self.piece_emb_size,
+            filters=self.piece_emb_size+1,
             kernel_size=[2, 2],
             padding="same",
             activation=T.nn.tanh)
@@ -60,7 +65,7 @@ class ChessAI:
 
         # conv2 = T.layers.conv2d(
         #     inputs=layer,
-        #     filters=self.piece_emb_size,
+        #     filters=self.piece_emb_size+1,
         #     kernel_size=[4, 4],
         #     padding="same",
         #     activation=T.nn.tanh)
@@ -80,19 +85,17 @@ class ChessAI:
         self.train = T.train.AdamOptimizer(self.lr).minimize(self.loss)
 
         # input each board position, and (for training) whether playing from that position resulted in a win
-        self.i = {'boards': boards, 'results': results}
+        self.i = {'boards': boards, 'results': results, 'turn': turn}
         # outputs the probability of winning from each board position, the highest probability board position,
         # and the loss function with respect to the label
         self.o = {'probs': probs, 'scores': scores, 'loss': self.loss}
 
-    def make_move(self, board, test=False):
+    def make_move(self, board, test=False, k=0.5):
         """Given boards corresponding to each move,
         returns the index of the board move the AI choses.
 
         boards - resulting boards after making every legal move
         k - temperature constant of softmax"""
-
-        whites_turn = board.turn
 
         np_board_list = []
 
@@ -102,16 +105,31 @@ class ChessAI:
             np_board_list.append(np_board)
             board.pop()
 
+        whites_turn = board.turn
+
+        np_turn = np.repeat(not whites_turn, len(np_board_list), axis=0)
+
         np_boards = np.stack(np_board_list, axis=0)
 
-        scores = self.sess.run(self.o['scores'], feed_dict={self.i['boards']: np_boards})
+        scores = self.sess.run(self.o['scores'], feed_dict={self.i['boards']: np_boards,
+                                                            self.i['turn']: np_turn})
 
         # scores tell us how likely white is to win the game from each board
+        #
 
-        if whites_turn:
+        # invert scores if it is black's turn
+        if not whites_turn:
+            scores = -scores
+
+        if test:
             return np.argmax(scores)
         else:
-            return np.argmin(scores)
+            # select from top n_select scoring board positions
+            n_select = int(k * np_boards.shape[0])
+            max_indices = np.argpartition(scores, -n_select)[-n_select:]
+            choice_index = random.sample(list(max_indices), 1)[0]
+            return choice_index
+
 
     def reinforce(self, board, result):
         """Apply reinforcement learning signal to AI.
@@ -129,6 +147,9 @@ class ChessAI:
 
         np_results = np.repeat(result, num_moves + 1, axis=0) # + 1 for starting board position
 
+        # input who's turn it is (0 - black, 1 - white)
+        np_turn = np.zeros([num_moves + 1])
+
         replay_board = chess.Board()
 
         np_board_list = []
@@ -137,6 +158,8 @@ class ChessAI:
 
             np_board = board_to_numpy(replay_board)
             np_board_list.append(np_board)
+
+            np_turn[move_index] = replay_board.turn
 
             # on last iteration, there is no move to make
             if move_index != num_moves:
@@ -147,7 +170,9 @@ class ChessAI:
         # we predict probability of white winning the game
 
         loss, scores, _ = self.sess.run([self.loss, self.o['scores'], self.train],
-                                feed_dict={self.i['results']: np_results, self.i['boards']: np_boards})
+                                feed_dict={self.i['results']: np_results,
+                                           self.i['boards']: np_boards,
+                                           self.i['turn']: np_turn})
 
         probs = 1 / (1 + np.exp(-scores))
         preds = np.round(probs)
