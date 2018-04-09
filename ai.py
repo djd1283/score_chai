@@ -59,18 +59,18 @@ class ChessAI:
             filters=self.piece_emb_size+1,
             kernel_size=[2, 2],
             padding="same",
-            activation=T.nn.tanh)
+            activation=T.nn.relu)
 
         layer = layer + conv1
 
-        # conv2 = T.layers.conv2d(
-        #     inputs=layer,
-        #     filters=self.piece_emb_size+1,
-        #     kernel_size=[4, 4],
-        #     padding="same",
-        #     activation=T.nn.tanh)
-        #
-        # layer = layer + conv2
+        conv2 = T.layers.conv2d(
+            inputs=layer,
+            filters=self.piece_emb_size+1,
+            kernel_size=[4, 4],
+            padding="same",
+            activation=T.nn.relu)
+
+        layer = layer + conv2
 
         # flatten features and scale values
         layer_flat = T.contrib.layers.flatten(layer)
@@ -98,9 +98,13 @@ class ChessAI:
         k - temperature constant of softmax"""
 
         np_board_list = []
+        results = []  # keep track for board positions if they are draw or loss for player
 
         for move in board.legal_moves:
             board.push(move)
+
+            results.append(str(board.result()))
+
             np_board = board_to_numpy(board)
             np_board_list.append(np_board)
             board.pop()
@@ -115,17 +119,45 @@ class ChessAI:
                                                             self.i['turn']: np_turn})
 
         # scores tell us how likely white is to win the game from each board
-        #
+
+        # set moves that end in wins or losses to +infinity and -infinity respectively
+        for index in range(len(results)):
+            rslt = results[index]
+
+            if rslt == '0-1':
+                scores[index] = -np.inf  # loss
+            elif rslt == '1-0':
+                scores[index] = np.inf  # win
 
         # invert scores if it is black's turn
         if not whites_turn:
             scores = -scores
 
+        # whoever's turn it is, set draw to low number
+        # (but greater than -infinity)
+        for index in range(len(results)):
+            rslt = results[index]
+            if rslt == '1/2-1/2':
+                scores[index] = -9999  # draw
+
+        # if a move will result in a win, make it.
+        # otherwise we select from remaining moves,
+        # with draw moves and loss moves having
+        # large negative scores (unlikely to be chosen)
+        for index in range(len(scores)):
+            if np.isposinf(scores[index]):
+                return index
+
+        # now we select moves with best scores
         if test:
             return np.argmax(scores)
         else:
             # select from top n_select scoring board positions
             n_select = int(k * np_boards.shape[0])
+
+            if n_select < 1:
+                n_select = 1
+
             max_indices = np.argpartition(scores, -n_select)[-n_select:]
             choice_index = random.sample(list(max_indices), 1)[0]
             return choice_index
@@ -174,10 +206,13 @@ class ChessAI:
                                            self.i['boards']: np_boards,
                                            self.i['turn']: np_turn})
 
-        probs = 1 / (1 + np.exp(-scores))
-        preds = np.round(probs)
-        wrong_preds = np.bitwise_xor(preds.astype(bool), np_results.astype(bool))
-        accuracy = 1 - np.mean(wrong_preds)
+        accuracy = None
+        if result != 0.5:
+
+            probs = 1 / (1 + np.exp(-scores))
+            preds = np.round(probs)
+            wrong_preds = np.bitwise_xor(preds.astype(bool), np_results.astype(bool))
+            accuracy = 1 - np.mean(wrong_preds)
 
         return loss, scores, accuracy
 
@@ -277,7 +312,7 @@ class RandomPlayer:
 
 
 
-    def make_move(self, board, test=False):
+    def make_move(self, board, test=False, k=None):
         moves = [move for move in board.legal_moves]
         rand_index = random.sample(range(len(moves)), 1)[0]
         return rand_index

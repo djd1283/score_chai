@@ -23,16 +23,21 @@ def calc_result(board):
 
 save_dir = os.path.join(DATA_DIR, 'models/')
 num_games = 100  # number of games to train the AI for
-games_per_save = 10000
-games_per_print = 10000
+games_per_save = 50000
+games_per_print = 50000
 verbose = True
 restore = True
-test = True  # if test, then ai plays top move every time, and no saving occurs
-white_ai = True  # otherwise random players
-black_ai = False
-random_play = False  # observe random games
+test = True  # no saving occurs
+k=0.5  # during self play, pick randomly from top k fraction of moves
 
-print('Chess AI Version 0.1')
+white_ai = True  # determine who is random and who is ai
+black_ai = False
+
+random_play = False  # observe random games (overrides setting above)
+
+train_on_draws = True  # train on draws or don't take them into account
+
+print('Chess AI Version 0.2')
 
 # make save directory
 if not os.path.exists(save_dir):
@@ -76,9 +81,9 @@ for train_index in tqdm.tqdm(range(num_games)):
 
             # tell player to make a move (choose a board)
             if board.turn:
-                choice_index = white.make_move(board, test=test)
+                choice_index = white.make_move(board, test=test, k=k)
             else:
-                choice_index = black.make_move(board, test=test)
+                choice_index = black.make_move(board, test=test, k=k)
 
             # think about changing this statement
             board.push(moves[choice_index])
@@ -108,13 +113,17 @@ for train_index in tqdm.tqdm(range(num_games)):
     # Train on game
     loss = None
 
-    if not test and result != 0.5:
+    if not test and (result != 0.5 or train_on_draws):
         # we give the game board to train on!
-        loss, game_scores, accuracy = white.reinforce(board, result)
-        accuracies.append(accuracy)
+        loss, game_scores, accuracy = ai.reinforce(board, result)
+
+        if accuracy is not None:
+            accuracies.append(accuracy)
+
         if game_scores is not None:
             scores.append(np.mean(game_scores))
             abs_scores.append(np.mean(np.abs(game_scores)))
+
         loss_values.append(loss)
 
     # Save periodically and print out stats
@@ -137,7 +146,7 @@ for train_index in tqdm.tqdm(range(num_games)):
             scores = []
 
     if train_index % games_per_save == 0 and train_index != 0 and not test:
-        white.save()
+        ai.save()
 
     # Print per game statistics
     if verbose:
