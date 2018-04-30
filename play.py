@@ -22,28 +22,31 @@ def calc_result(board):
         raise AssertionError('Wrong board result: %s' % rslt)
 
 save_dir = os.path.join(DATA_DIR, 'models/')
-num_games = 100  # number of games to train the AI for
-games_per_save = 50000
+num_games = 100000000  # number of games to train the AI for
+games_per_save = 1000
 games_per_print = 50000
-verbose = True
+verbose = False
 restore = True
-test = True  # no saving occurs
-k=0.5  # during self play, pick randomly from top k fraction of moves
+test = False  # no saving occurs
+emb_size = 63  # for 64 filters per convolution
+learning_rate = 0.00875
+n_layers = 10
+k=10  # temperature of softmax
 
 white_ai = True  # determine who is random and who is ai
-black_ai = False
+black_ai = True
 
 random_play = False  # observe random games (overrides setting above)
 
 train_on_draws = True  # train on draws or don't take them into account
 
-print('Chess AI Version 0.2')
+print('Chess AI Version 1.0')
 
 # make save directory
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
-ai = ChessAI(piece_emb_size=100, lr=0.01, save_dir=save_dir, restore=restore)
+ai = ChessAI(piece_emb_size=emb_size, lr=learning_rate, save_dir=save_dir, n_layers=n_layers, restore=restore)
 
 if white_ai:
     white = ai

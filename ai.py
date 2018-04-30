@@ -8,11 +8,14 @@ piece_ids = {'r': 1, 'n': 2, 'b': 3, 'q': 4, 'k': 5, 'p': 6,
              'R': 7, 'N': 8, 'B': 9, 'Q': 10, 'K': 11, 'P': 12, ' ': 0}
 
 class ChessAI:
-    def __init__(self, piece_emb_size, lr, restore=False, save_dir=None, **kwargs):
+    def __init__(self, piece_emb_size, lr, restore=False, save_dir=None, n_layers=5, **kwargs):
+        """Chess AI that plays chess by selecting moves with the highest probability of winning.
+        AI views board configurations and scores them. A move that results in a board configuration
+        with the highest score is chosen."""
         self.piece_emb_size = piece_emb_size
-
         self.save_dir = save_dir
         self.restore = restore
+        self.n_layers = n_layers
         self.lr = lr  # learning rate
         self.build()
 
@@ -54,23 +57,16 @@ class ChessAI:
 
         layer = input_embs
 
-        conv1 = T.layers.conv2d(
-            inputs=board_embs,
-            filters=self.piece_emb_size+1,
-            kernel_size=[2, 2],
-            padding="same",
-            activation=T.nn.relu)
+        for i in range(self.n_layers):
+            # resnet of convolutional layers
+            conv = T.layers.conv2d(
+                inputs=layer,
+                filters=self.piece_emb_size+1,
+                kernel_size=[3, 3],
+                padding="same",
+                activation=T.nn.tanh)
 
-        layer = layer + conv1
-
-        conv2 = T.layers.conv2d(
-            inputs=layer,
-            filters=self.piece_emb_size+1,
-            kernel_size=[4, 4],
-            padding="same",
-            activation=T.nn.relu)
-
-        layer = layer + conv2
+            layer = layer + conv
 
         # flatten features and scale values
         layer_flat = T.contrib.layers.flatten(layer)
@@ -90,7 +86,7 @@ class ChessAI:
         # and the loss function with respect to the label
         self.o = {'probs': probs, 'scores': scores, 'loss': self.loss}
 
-    def make_move(self, board, test=False, k=0.5):
+    def make_move(self, board, test=False, k=1):
         """Given boards corresponding to each move,
         returns the index of the board move the AI choses.
 
@@ -120,32 +116,31 @@ class ChessAI:
 
         # scores tell us how likely white is to win the game from each board
 
-        # set moves that end in wins or losses to +infinity and -infinity respectively
+        # set moves that end in wins or losses to large and small values respectively
         for index in range(len(results)):
             rslt = results[index]
 
             if rslt == '0-1':
-                scores[index] = -np.inf  # loss
+                scores[index] = -10  # loss
             elif rslt == '1-0':
-                scores[index] = np.inf  # win
+                scores[index] = 10  # win
 
         # invert scores if it is black's turn
         if not whites_turn:
             scores = -scores
 
         # whoever's turn it is, set draw to low number
-        # (but greater than -infinity)
         for index in range(len(results)):
             rslt = results[index]
             if rslt == '1/2-1/2':
-                scores[index] = -9999  # draw
+                scores[index] = -9  # draw
 
         # if a move will result in a win, make it.
         # otherwise we select from remaining moves,
         # with draw moves and loss moves having
         # large negative scores (unlikely to be chosen)
         for index in range(len(scores)):
-            if np.isposinf(scores[index]):
+            if scores[index] == 10:
                 return index
 
         # now we select moves with best scores
@@ -153,13 +148,18 @@ class ChessAI:
             return np.argmax(scores)
         else:
             # select from top n_select scoring board positions
-            n_select = int(k * np_boards.shape[0])
+            # n_select = int(k * np_boards.shape[0])
+            #
+            # if n_select < 1:
+            #     n_select = 1
+            #
+            # max_indices = np.argpartition(scores, -n_select)[-n_select:]
+            # choice_index = random.sample(list(max_indices), 1)[0]
 
-            if n_select < 1:
-                n_select = 1
+            probs = stable_softmax(k * scores)
 
-            max_indices = np.argpartition(scores, -n_select)[-n_select:]
-            choice_index = random.sample(list(max_indices), 1)[0]
+            choice_index = np.random.choice(range(np_boards.shape[0]), p=probs)
+
             return choice_index
 
 
@@ -220,6 +220,18 @@ class ChessAI:
         assert self.save_dir is not None
         self.saver.save(self.sess, self.save_dir, global_step=self.step, write_meta_graph=False)
         self.step += 1
+
+    def calc_white_win_prob(self, board):
+        """From a give board position, calculate probability
+        of white winning the game."""
+        np_board = np.reshape(board_to_numpy(board), [1, 8, 8])
+        np_turn = np.reshape(board.turn, [1])
+        scores = self.sess.run(self.o['scores'], feed_dict={self.i['boards']: np_board, self.i['turn']: np_turn})
+        score = scores[0]
+        prob = 1 / (1 + np.exp(-score))
+
+        return prob
+
 
 
 def board_to_numpy(board, mirror=False):
@@ -306,11 +318,41 @@ def load_scope_from_save(save_dir, sess, scope):
     restore_model_from_save(save_dir, sess, var_list=variables)
 
 
+def stable_softmax(x):
+    """Softmax function that does not suffer from overflow.
+    Subtracts the max value from x before calculating, based on
+    the identity softmax(x + c) = softmax(x).
+
+    Returns: reslt"""
+
+    valid_x = x - np.max(x)
+    e_term = np.exp(valid_x)
+    return e_term / np.sum(e_term)
+
+
+class HumanPlayer:
+    """Allow human player to play chess through terminal."""
+    def make_move(self, board, test=None, k=None):
+        print('Turn: %s' % len(board.move_stack))
+        print(board)
+        print('A B C D E F G H')
+
+        move_strs = [str(move) for move in board.legal_moves]
+        print('Legal moves: %s' % move_strs)
+
+        while True:
+            human_move = input('Enter move: ')
+            if human_move in move_strs:
+                index = move_strs.index(human_move)
+                break
+            else:
+                print('Not legal. Try again.')
+        return index
+
+
 class RandomPlayer:
     """Player which makes random moves. This is the baseline against which
     we will compare our chess AI."""
-
-
 
     def make_move(self, board, test=False, k=None):
         moves = [move for move in board.legal_moves]
